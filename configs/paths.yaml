@@ -1,0 +1,24 @@
+pdb_dir: "structure/pdb"
+labels_csv: "data/raw/labels.csv"
+embeddings_dir: embeddings/ESM1b         # ← 存 *.npz 的目录（WT 和 mutant）
+out_csv: data/processed/pair_features.csv# ← 生成的特征表输出位置
+with_wt: false                           # ← 若想把 WT 向量也拼进表里就改成 true
+
+
+wt_fasta: "data/wt/wt_antibodies.fasta"
+map_dir: "data/wt/residue_index_maps"
+embeddings_dir: "embeddings/mutant_embeddings"
+merged_csv: "data/processed/merged_features.csv"
+
+models_dir: "models"
+esm1b_weights: "models/checkpoints/esm1b_t33_650M_UR50S.pt"
+device: "cuda"
+batch_size: 8
+fp16: true
+
+# 交互模型超参（可选）
+bilinear_rank: 32
+bilinear_epochs: 800
+bilinear_weight_decay: 1e-4
+bilinear_lr: 1e-2
+bilinear_patience: 50

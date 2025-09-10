@@ -1,0 +1,228 @@
+# ===========================
+# RUN_ALL.txt  (Ubuntu / bash)
+# Antibody ΔΔG workflow: environment -> directories -> features -> OOF training -> full fit -> (optional) calibration -> prediction
+# Conventions: VHH uses heavy chain only (H-only). Low-rank = 96.
+# ===========================
+
+# 0) Environment (Conda)
+conda env create -f environment.yml
+conda activate antibody-lite
+# Purpose: create and activate the runtime environment.
+
+# 0.1) Optional: verify PyTorch CUDA
+python - <<'PY'
+import torch; print("torch:", torch.__version__, "| cuda:", torch.cuda.is_available())
+PY
+# Purpose: confirm whether CUDA is available.
+
+# 1) Create required directories
+mkdir -p configs data/raw data/processed embeddings/ESM1b models/checkpoints OOF output Sample_Mutant
+# Purpose: ensure expected folders exist.
+
+# 1.1) Place ESM-1b weights (manual step)
+# Copy esm1b_t33_650M_UR50S.pt into models/checkpoints/
+# Purpose: local checkpoint used by embedding/prediction.
+
+# 2) (Optional) Validate YAML config syntax
+python - <<'PY'
+import yaml, sys
+p = "configs/paths.yaml"
+yaml.safe_load(open(p, "r", encoding="utf-8"))
+print("YAML OK:", p)
+PY
+# Purpose: quick syntax check for configs/paths.yaml.
+
+# 3) Build training matrix (pair_features.csv) from embeddings + labels
+python scripts/build_bilinear_dataset.py
+# Or include WT vectors as features:
+# python scripts/build_bilinear_dataset.py --with-wt
+# Purpose: reads embeddings and data/raw/labels.csv, writes data/processed/pair_features.csv.
+# Rule: H mutation -> zH = mut - wtH, zL = 0; L mutation -> zL = mut - wtL, zH = 0. VHH -> H-only.
+
+# 4) Train with out-of-fold (OOF) validation (VHH trains H only)
+python scripts/train_energy_siamese.py \
+  --chain H \
+  --rank 96 \
+  --epochs 1500 \
+  --patience 150 \
+  --device cuda
+# Purpose: K-fold OOF training. Produces OOF CSVs (if enabled) and prints metrics.
+
+# 5) Fit the final model on all data
+python scripts/fit_full_energy_siamese.py \
+  --chain H \
+  --rank 96 \
+  --device cuda
+# Purpose: trains on full dataset. Saves models/energy_H_rank96_full.pt and scaler_H.pkl (scaler_L.pkl for interface symmetry).
+
+# 6) (Optional) Fit a ΔΔG calibrator from OOF predictions
+python scripts/fit_ddg_calibrator.py \
+  --oof-csv OOF/oof_energy_siamese_H_final.csv \
+  --out models/calib_H_iso.pkl
+# Purpose: learn a 1-D isotonic calibration to better match experimental scale.
+
+# 7) Predict ΔΔG for a WT sequence over a position range (VHH, H-only)
+python scripts/predict_ddg_overall.py \
+  --wt input/WT.fasta \
+  --positions 22-148 \
+  --esm-ckpt models/checkpoints/esm1b_t33_650M_UR50S.pt \
+  --model models/energy_H_rank96_full.pt \
+  --scaler-h models/scaler_H.pkl \
+  --scaler-l models/scaler_L.pkl \
+  --out-dir output \
+  --tag VHH \
+  --topk 10 \
+  --top-mode neg \
+  --device cuda \
+  --batch-size 8
+# Purpose: enumerate all single mutants at specified positions, score ΔΔG, save full table, top-K list, and volcano plot.
+
+# 7.1) Apply the calibrator during prediction (if trained)
+# Add the following flag to the command above:
+#   --calib models/calib_H_iso.pkl
+# Purpose: map raw predictions to calibrated values.
+
+# 8) (Optional) Convert ΔΔG to affinity fold change and write back to CSV
+python - <<'PY'
+import numpy as np, pandas as pd
+R, T = 1.987e-3, 298.15  # kcal/mol/K
+p = "output/VHH_ALL_ddg.csv"
+df = pd.read_csv(p)
+col = "pred_ddg_cal" if "pred_ddg_cal" in df.columns else "pred_ddg"
+df["fold_change"] = np.exp(-(df[col])/(R*T))
+outp = p.replace(".csv", "_with_fold.csv")
+df.to_csv(outp, index=False)
+print("Saved:", outp)
+PY
+# Purpose: compute fold = exp(-ΔΔG / (R*T)); negative ΔΔG corresponds to fold > 1.
+
+# 9) (Optional) Minimal Git commit (exclude large artifacts)
+git init
+printf "%s\n" \
+"__pycache__/" "*.pyc" "*.pkl" "*.pt" "*.npz" "*.npy" ".DS_Store" \
+"output/" "Sample_Mutant/" ".env" ".venv" > .gitignore
+git add README.md environment.yml configs/paths.yaml .gitignore scripts data/raw/labels.csv
+git commit -m "Add minimal reproducible pipeline"
+# Purpose: version only documentation, environment, config, scripts, and sample labels.
+# ===========================
+# End
+# ===========================
+
+
+# ===========================
+# RUN_ALL.txt  (Ubuntu / bash)
+# 抗体 ΔΔG 工作流：环境 -> 目录 -> 特征 -> 训练/OOF -> 全量拟合 -> 校准(可选) -> 预测
+# 约定：VHH 使用 H-only；低秩 rank=96
+# ===========================
+
+# 0) 环境准备（Conda）
+conda env create -f environment.yml
+conda activate antibody-lite
+# 功能：创建并激活运行环境（GPU 用户 environment.yml 里含 pytorch-cuda=11.8）
+
+# 0.1) 可选：快速自检 PyTorch 能否用到 GPU
+python - <<'PY'
+import torch; print("torch:", torch.__version__, "| cuda:", torch.cuda.is_available())
+PY
+# 功能：确认 CUDA 是否可用
+
+# 1) 创建必要目录
+mkdir -p configs data/raw data/processed embeddings/ESM1b models/checkpoints OOF output Sample_Mutant
+# 功能：把项目需要的目录一次性建好
+
+# 1.1) 放置 ESM-1b 权重
+# 请把 esm1b_t33_650M_UR50S.pt 放到 models/checkpoints/
+# 功能：供嵌入与预测脚本调用本地权重
+
+# 2) 校验 YAML 配置是否 OK（可选但强烈建议）
+python - <<'PY'
+import yaml; p="configs/paths.yaml"
+print("Checking YAML:", p)
+yaml.safe_load(open(p, "r", encoding="utf-8"))
+print("YAML OK")
+PY
+# 功能：检查 configs/paths.yaml 语法与缩进
+
+# 3) 由 ESM 嵌入 + 标签 生成训练表 (pair_features.csv)
+python scripts/build_bilinear_dataset.py
+# 或包含 WT 向量列：
+# python scripts/build_bilinear_dataset.py --with-wt
+# 功能：读取 embeddings/ESM1b/*.npz 与 data/raw/labels.csv，生成 data/processed/pair_features.csv
+# 规则：H 突变 -> zH = mut - wtH, zL=0；L 突变 -> zL = mut - wtL, zH=0；VHH 只会有 H 行
+
+# 3.1) 快速查看行数与缺失文件统计（脚本会打印）
+# 功能：确认跳过的样本数是否合理
+
+# 4) 训练（带 OOF 验证），VHH 只训 H
+python scripts/train_energy_siamese.py \
+  --chain H \
+  --rank 96 \
+  --epochs 1500 \
+  --patience 150 \
+  --device cuda
+# 功能：K 折 OOF 训练，产出 OOF/*.csv（若脚本已开启保存）与控制台指标
+
+# 5) 全量拟合（最终部署模型）
+python scripts/fit_full_energy_siamese.py \
+  --chain H \
+  --rank 96 \
+  --device cuda
+# 功能：在全部训练数据上拟合，保存 models/energy_H_rank96_full.pt 与 scaler_H.pkl（scaler_L.pkl 同步接口）
+
+# 6) 可选：利用 OOF 训练 ΔΔG 校准器（等值回归）
+# 路线 A：若你已经有整合好的 OOF 表（如 OOF/oof_energy_siamese_H_final.csv），直接：
+python scripts/fit_ddg_calibrator.py \
+  --oof-csv OOF/oof_energy_siamese_H_final.csv \
+  --out models/calib_H_iso.pkl
+
+# 路线 B：先把多个 OOF 汇总成一张训练表再校准（如果你使用 prepare 脚本）
+# python scripts/prepare_h_oof_for_calib.py --oof-dir OOF --labels data/raw/labels.csv --out output/VHH_ALL_ddg.csv
+# python scripts/fit_ddg_calibrator.py --train-csv output/VHH_ALL_ddg.csv --out models/calib_H_iso.pkl
+# 功能：把 OOF 预测对齐真值，学一个 1D 标定器，预测时可更贴近实验尺度
+
+# 7) 预测一个 WT 序列在指定位点范围的所有单突变（VHH，H-only）
+python scripts/predict_ddg_overall.py \
+  --wt input/WT.fasta \
+  --positions 22-148 \
+  --esm-ckpt models/checkpoints/esm1b_t33_650M_UR50S.pt \
+  --model models/energy_H_rank96_full.pt \
+  --scaler-h models/scaler_H.pkl \
+  --scaler-l models/scaler_L.pkl \
+  --out-dir output \
+  --tag VHH \
+  --topk 10 \
+  --top-mode neg \
+  --device cuda \
+  --batch-size 8
+# 功能：自动枚举位点 × 19 个氨基酸，输出全表与 TopK（ΔΔG 越负越可能亲和力提升）
+
+# 7.1) 预测时启用校准器（如果已训练）
+# 在上面命令末尾追加：
+#   --calib models/calib_H_iso.pkl
+# 功能：把原始预测映射到“更符合实验刻度”的值
+
+# 8) 可选：把 ΔΔG 换算成亲和力倍数（fold change），写回表
+python - <<'PY'
+import numpy as np, pandas as pd
+R, T = 1.987e-3, 298.15  # kcal/mol/K, room temperature
+p = "output/VHH_ALL_ddg.csv"  # 预测脚本的完整输出表
+df = pd.read_csv(p)
+col = "pred_ddg_cal" if "pred_ddg_cal" in df.columns else "pred_ddg"
+df["fold_change"] = np.exp(-(df[col])/(R*T))
+df.to_csv(p.replace(".csv", "_with_fold.csv"), index=False)
+print("Saved:", p.replace(".csv", "_with_fold.csv"))
+PY
+# 功能：ΔΔG -> exp(-ΔΔG/RT)，负值对应 fold>1（亲和力提升）
+
+# 9) 可选：最小 Git 提交（别把大模型、输出塞进仓库）
+git init
+printf "%s\n" \
+"__pycache__/" "*.pyc" "*.pkl" "*.pt" "*.npz" "*.npy" ".DS_Store" \
+"output/" "Sample_Mutant/" ".env" ".venv" > .gitignore
+git add README.md environment.yml configs/paths.yaml .gitignore scripts data/raw/labels.csv
+git commit -m "chore: minimal reproducible pipeline"
+# 功能：把说明、环境、配置、脚本与示例标签纳入版本控制（大文件请 LFS 或外链）
+
+# ===========================
+# 结束。该跑的都在上面了。
+# ===========================
